@@ -1,0 +1,1 @@
+print("Hello, Negin! Python is ready!")

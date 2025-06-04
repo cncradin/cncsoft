@@ -1,0 +1,1626 @@
+from PyQt5 import QtWidgets
+from PyQt5.QtWidgets import (
+    QFileDialog, QGraphicsScene, QGraphicsView, QGraphicsLineItem, QGraphicsEllipseItem,
+    QGraphicsRectItem, QLabel, QLineEdit, QGraphicsTextItem, QDialog, QVBoxLayout,
+    QHBoxLayout, QWidget, QPushButton, QMenuBar, QMenu, QGraphicsItem, QGraphicsItemGroup,
+    QComboBox, QDialogButtonBox, QCheckBox, QSplitter, QSlider, QShortcut
+)
+from PyQt5.QtCore import Qt, QPointF, QRectF, QUrl, QDir, QTimer
+from PyQt5.QtGui import QPen, QColor, QPainter, QBrush, QPixmap, QPainterPath, QPainterPathStroker, QIcon, QKeySequence
+from PyQt5.QtCore import QStandardPaths
+import ezdxf
+import sys
+import numpy as np
+import math
+import json
+import os
+
+COLOR_PALETTE = [
+    QColor(255, 0, 0), QColor(0, 255, 0), QColor(0, 0, 255), QColor(255, 255, 0),
+    QColor(255, 165, 0), QColor(128, 0, 128), QColor(255, 105, 180), QColor(139, 69, 19),
+    QColor(0, 0, 0), QColor(255, 255, 255), QColor(128, 128, 128), QColor(0, 255, 255),
+]
+
+def find_closest_color(color):
+    r1, g1, b1 = color.red(), color.green(), color.blue()
+    min_distance = float('inf')
+    closest_color = COLOR_PALETTE[0]
+    closest_index = 0
+    for i, palette_color in enumerate(COLOR_PALETTE):
+        r2, g2, b2 = palette_color.red(), palette_color.green(), palette_color.blue()
+        distance = math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
+        if distance < min_distance:
+            min_distance = distance
+            closest_color = palette_color
+            closest_index = i
+    return closest_color, closest_index
+
+def aci_to_qcolor(aci):
+    aci_colors = {
+        1: (255, 0, 0), 2: (255, 255, 0), 3: (0, 255, 0), 4: (0, 255, 255),
+        5: (0, 0, 255), 6: (255, 0, 255), 7: (255, 255, 255), 8: (128, 128, 128), 9: (192, 192, 192),
+    }
+    if aci in aci_colors:
+        r, g, b = aci_colors[aci]
+        color = QColor(r, g, b)
+    else:
+        if aci == 0 or aci is None:
+            color = QColor(0, 0, 0)
+        else:
+            r = (aci * 37) % 255
+            g = (aci * 53) % 255
+            b = (aci * 97) % 255
+            color = QColor(r, g, b)
+    closest_color, closest_index = find_closest_color(color)
+    return closest_color, closest_index
+
+class ColorPalette(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(300, 30)
+        self.colors = COLOR_PALETTE
+        self.parent = parent
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        circle_size = 20
+        spacing = 5
+        x_offset = 5
+        for color in self.colors:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(x_offset, 5, circle_size, circle_size)
+            x_offset += circle_size + spacing
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            x = event.pos().x()
+            circle_size = 20
+            spacing = 5
+            x_offset = 5
+            for i, color in enumerate(self.colors):
+                circle_x = x_offset + (circle_size + spacing) * i
+                if circle_x <= x < circle_x + circle_size:
+                    self.parent.change_selected_items_color(color)
+                    break
+
+class LayerBox(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.layers = []
+        self.layout = QVBoxLayout(self)
+        self.layout.setSpacing(5)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.update_layers([])
+
+    def update_layers(self, used_colors):
+        for layer in self.layers:
+            if "empty_label" in layer:
+                layer["empty_label"].deleteLater()
+            else:
+                layer["color_label"].deleteLater()
+                layer["layer_label"].deleteLater()
+                layer["speed_edit"].deleteLater()
+                layer["power_edit"].deleteLater()
+                layer["output_check"].deleteLater()
+        self.layers.clear()
+        num_layers = len(used_colors)
+        if num_layers == 0:
+            self.setFixedSize(400, 100)
+        else:
+            self.setFixedSize(400, 30 * num_layers + 20)
+        for i, color in enumerate(used_colors[:12]):
+            layer_layout = QHBoxLayout()
+            layer_layout.setSpacing(10)
+            color_label = QLabel()
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(0, 0, 20, 20)
+            painter.end()
+            color_label.setPixmap(pixmap)
+            color_label.setFixedSize(20, 20)
+            layer_layout.addWidget(color_label)
+            layer_label = QLabel(f"لایه {i+1}")
+            layer_layout.addWidget(layer_label)
+            speed_edit = QLineEdit("500")
+            speed_edit.setFixedWidth(60)
+            speed_edit.setEnabled(False)
+            layer_layout.addWidget(speed_edit)
+            power_edit = QLineEdit("1000")
+            power_edit.setFixedWidth(60)
+            power_edit.setEnabled(False)
+            layer_layout.addWidget(power_edit)
+            output_check = QCheckBox("خروجی")
+            output_check.setChecked(True)
+            output_check.setEnabled(False)
+            layer_layout.addWidget(output_check)
+            layer_layout.addStretch()
+            self.layout.addLayout(layer_layout)
+            self.layers.append({
+                "color_label": color_label, "layer_label": layer_label,
+                "speed_edit": speed_edit, "power_edit": power_edit,
+                "output_check": output_check, "color": color
+            })
+        if not used_colors:
+            empty_label = QLabel("هیچ لایه‌ای شناسایی نشده")
+            self.layout.addWidget(empty_label)
+            self.layers.append({"empty_label": empty_label})
+
+class PreviewGraphicsView(QGraphicsView):
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.zoom_factor = 1.15
+        self.scene().setBackgroundBrush(Qt.black)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+
+    def wheelEvent(self, event):
+        zoom_in = event.angleDelta().y() > 0
+        if zoom_in:
+            zoom = self.zoom_factor
+        else:
+            zoom = 1 / self.zoom_factor
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        mouse_pos = self.mapToScene(event.pos())
+        self.scale(zoom, zoom)
+        new_pos = self.mapToScene(event.pos())
+        delta = new_pos - mouse_pos
+        self.translate(delta.x(), delta.y())
+
+    def fit_to_content(self):
+        items = self.scene().items()
+        if not items:
+            return
+        bounding_rect = QRectF()
+        for item in items:
+            if isinstance(item, (QGraphicsLineItem, QGraphicsEllipseItem)):
+                item_rect = item.sceneBoundingRect()
+                if bounding_rect.isNull():
+                    bounding_rect = item_rect
+                else:
+                    bounding_rect = bounding_rect.united(item_rect)
+        if not bounding_rect.isNull():
+            margin = 20
+            bounding_rect.adjust(-margin, -margin, margin, margin)
+            self.fitInView(bounding_rect, Qt.KeepAspectRatio)
+        else:
+            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+
+class CustomFileDialog(QFileDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("انتخاب فایل DXF")
+        self.setNameFilter("فایل‌های DXF (*.dxf)")
+        self.setFileMode(QFileDialog.ExistingFile)
+        self.setOption(QFileDialog.DontUseNativeDialog, True)
+        self.resize(1000, 720)
+        sidebar_urls = []
+        desktop_paths = QStandardPaths.standardLocations(QStandardPaths.DesktopLocation)
+        if desktop_paths:
+            sidebar_urls.append(QUrl.fromLocalFile(desktop_paths[0]))
+        documents_paths = QStandardPaths.standardLocations(QStandardPaths.DocumentsLocation)
+        if documents_paths:
+            sidebar_urls.append(QUrl.fromLocalFile(documents_paths[0]))
+        home_paths = QStandardPaths.standardLocations(QStandardPaths.HomeLocation)
+        if home_paths:
+            sidebar_urls.append(QUrl.fromLocalFile(home_paths[0]))
+        drives = QDir.drives()
+        for drive in drives:
+            sidebar_urls.append(QUrl.fromLocalFile(drive.absolutePath()))
+        self.setSidebarUrls(sidebar_urls)
+        self.preview_scene = QGraphicsScene(self)
+        self.preview_view = PreviewGraphicsView(self.preview_scene, self)
+        self.preview_view.setMinimumSize(400, 400)
+        layout = self.layout()
+        if layout is None:
+            layout = QVBoxLayout()
+            self.setLayout(layout)
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter)
+        splitter.addWidget(self.preview_view)
+        splitter.setSizes([600, 400])
+        self.currentChanged.connect(self.update_preview)
+
+    def update_preview(self, path):
+        self.preview_scene.clear()
+        if not path or not os.path.isfile(path) or not path.lower().endswith('.dxf'):
+            self.preview_scene.setSceneRect(0, 0, 400, 400)
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            return
+        try:
+            doc = ezdxf.readfile(path)
+            msp = doc.modelspace()
+            min_x, min_y = float('inf'), float('inf')
+            max_x, max_y = float('-inf'), float('-inf')
+            temp_items = []
+            for entity in msp:
+                color = aci_to_qcolor(entity.dxf.color)[0] if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'color') else QColor(0, 0, 0)
+                if entity.dxftype() == "LINE":
+                    x1, y1 = entity.dxf.start.x, -entity.dxf.start.y
+                    x2, y2 = entity.dxf.end.x, -entity.dxf.end.y
+                    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                        continue
+                    min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                    min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                    line = QGraphicsLineItem(x1, y1, x2, y2)
+                    pen = QPen(color, 0)
+                    pen.setCosmetic(True)
+                    line.setPen(pen)
+                    temp_items.append(line)
+                elif entity.dxftype() == "SPLINE":
+                    points = entity.fit_points if entity.fit_points else list(entity.flattening(distance=0.01))
+                    if len(points) < 2:
+                        continue
+                    is_line = all(abs(point[1] - points[0][1]) < 0.01 for point in points)
+                    if is_line:
+                        x1, y1 = points[0][0], -points[0][1]
+                        x2, y2 = points[-1][0], -points[-1][1]
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                            continue
+                        min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                        min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                        line = QGraphicsLineItem(x1, y1, x2, y2)
+                        pen = QPen(color, 0)
+                        pen.setCosmetic(True)
+                        line.setPen(pen)
+                        temp_items.append(line)
+                    else:
+                        for i in range(len(points) - 1):
+                            x1, y1 = points[i][0], -points[i][1]
+                            x2, y2 = points[i + 1][0], -points[i + 1][1]
+                            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                                continue
+                            min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                            min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                            line = QGraphicsLineItem(x1, y1, x2, y2)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            temp_items.append(line)
+                elif entity.dxftype() == "LWPOLYLINE":
+                    points = entity.get_points()
+                    if len(points) < 2:
+                        continue
+                    for i in range(len(points) - 1):
+                        x1, y1 = points[i][0], -points[i][1]
+                        x2, y2 = points[i + 1][0], -points[i + 1][1]
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                            continue
+                        min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                        min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                        line = QGraphicsLineItem(x1, y1, x2, y2)
+                        pen = QPen(color, 0)
+                        pen.setCosmetic(True)
+                        line.setPen(pen)
+                        temp_items.append(line)
+                    if entity.closed:
+                        x1, y1 = points[-1][0], -points[-1][1]
+                        x2, y2 = points[0][0], -points[0][1]
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                            continue
+                        min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                        min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                        line = QGraphicsLineItem(x1, y1, x2, y2)
+                        pen = QPen(color, 0)
+                        pen.setCosmetic(True)
+                        line.setPen(pen)
+                        temp_items.append(line)
+                elif entity.dxftype() == "CIRCLE":
+                    center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                    radius = entity.dxf.radius
+                    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, radius]) or radius <= 0:
+                        continue
+                    min_x, max_x = min(min_x, center_x - radius), max(max_x, center_x + radius)
+                    min_y, max_y = min(min_y, center_y - radius), max(max_y, center_y + radius)
+                    ellipse = QGraphicsEllipseItem(center_x - radius, center_y - radius, 2 * radius, 2 * radius)
+                    pen = QPen(color, 0)
+                    pen.setCosmetic(True)
+                    ellipse.setPen(pen)
+                    temp_items.append(ellipse)
+                elif entity.dxftype() == "ARC":
+                    center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                    radius = entity.dxf.radius
+                    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, radius]) or radius <= 0:
+                        continue
+                    min_x, max_x = min(min_x, center_x - radius), max(max_x, center_x + radius)
+                    min_y, max_y = min(min_y, center_y - radius), max(max_y, center_y + radius)
+                    start_angle = math.radians(entity.dxf.start_angle)
+                    end_angle = math.radians(entity.dxf.end_angle)
+                    if end_angle < start_angle:
+                        end_angle += 2 * math.pi
+                    num_segments = 72  # افزایش دقت برای ARC
+                    prev_x, prev_y = None, None
+                    for i in range(num_segments + 1):
+                        t = i / num_segments
+                        angle = start_angle + (end_angle - start_angle) * t
+                        x = center_x + radius * math.cos(angle)
+                        y = center_y + radius * math.sin(angle)
+                        if i > 0:
+                            line = QGraphicsLineItem(prev_x, prev_y, x, y)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            temp_items.append(line)
+                        prev_x, prev_y = x, y
+                elif entity.dxftype() == "ELLIPSE":
+                    center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                    major_axis = entity.dxf.major_axis
+                    ratio = entity.dxf.ratio
+                    major_radius = math.sqrt(major_axis[0]**2 + major_axis[1]**2)
+                    minor_radius = major_radius * ratio
+                    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, major_radius, minor_radius]) or major_radius <= 0 or minor_radius <= 0:
+                        continue
+                    min_x, max_x = min(min_x, center_x - major_radius), max(max_x, center_x + major_radius)
+                    min_y, max_y = min(min_y, center_y - major_radius), max(max_y, center_y + major_radius)
+                    rotation = math.atan2(major_axis[1], major_axis[0])
+                    start_angle = entity.dxf.start_angle if hasattr(entity.dxf, 'start_angle') else 0
+                    end_angle = entity.dxf.end_angle if hasattr(entity.dxf, 'end_angle') else 2 * math.pi
+                    if end_angle < start_angle:
+                        end_angle += 2 * math.pi
+                    num_segments = 72  # افزایش دقت برای ELLIPSE
+                    prev_x, prev_y = None, None
+                    for i in range(num_segments + 1):
+                        t = i / num_segments
+                        angle = start_angle + (end_angle - start_angle) * t
+                        x_unrotated = major_radius * math.cos(angle)
+                        y_unrotated = minor_radius * math.sin(angle)
+                        x = center_x + x_unrotated * math.cos(rotation) - y_unrotated * math.sin(rotation)
+                        y = center_y + x_unrotated * math.sin(rotation) + y_unrotated * math.cos(rotation)
+                        if i > 0:
+                            line = QGraphicsLineItem(prev_x, prev_y, x, y)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            temp_items.append(line)
+                        prev_x, prev_y = x, y
+            if min_x != float('inf'):
+                center_x = (min_x + max_x) / 2
+                center_y = (min_y + max_y) / 2
+                offset_x = -center_x
+                offset_y = -center_y
+                for item in temp_items:
+                    if isinstance(item, QGraphicsLineItem):
+                        line = item.line()
+                        item.setLine(line.x1() + offset_x, line.y1() + offset_y,
+                                     line.x2() + offset_x, line.y2() + offset_y)
+                    elif isinstance(item, QGraphicsEllipseItem):
+                        rect = item.rect()
+                        item.setRect(rect.x() + offset_x, rect.y() + offset_y, rect.width(), rect.height())
+                    self.preview_scene.addItem(item)
+                width = max_x - min_x
+                height = max_y - min_y
+                margin = 20
+                self.preview_scene.setSceneRect(-width/2 - margin, -height/2 - margin,
+                                               width + 2 * margin, height + 2 * margin)
+                self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            else:
+                self.preview_scene.setSceneRect(0, 0, 400, 400)
+                self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            self.preview_scene.update()
+            self.preview_view.viewport().repaint()
+        except Exception as e:
+            print(f"خطا در پیش‌نمایش: {str(e)}")
+            self.preview_scene.clear()
+            self.preview_scene.setSceneRect(0, 0, 400, 400)
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+
+class SelectableGraphicsItem(QGraphicsLineItem):
+    def __init__(self, x1, y1, x2, y2, color):
+        super().__init__(x1, y1, x2, y2)
+        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        self.selected_pen = QPen(Qt.yellow, 0)
+        self.selected_pen.setCosmetic(True)
+        self.setPen(self.normal_pen)
+        self.setAcceptHoverEvents(True)
+        self._original_color = color  # ذخیره رنگ اولیه
+
+    def shape(self):
+        path = QPainterPath()
+        path.moveTo(self.line().p1())
+        path.lineTo(self.line().p2())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(2.0)
+        return stroker.createStroke(path)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.setPen(self.selected_pen if value else self.normal_pen)
+            self.update()
+        return super().itemChange(change, value)
+
+    def set_normal_color(self, color):
+        self._original_color = color
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        if not self.isSelected():
+            self.setPen(self.normal_pen)
+        self.update()
+
+class SelectableEllipseItem(QGraphicsEllipseItem):
+    def __init__(self, x, y, w, h, color):
+        super().__init__(x, y, w, h)
+        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        self.selected_pen = QPen(Qt.yellow, 0)
+        self.selected_pen.setCosmetic(True)
+        self.setPen(self.normal_pen)
+        self.setAcceptHoverEvents(True)
+        self._original_color = color  # ذخیره رنگ اولیه
+
+    def shape(self):
+        path = QPainterPath()
+        path.addEllipse(self.rect())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(2.0)
+        return stroker.createStroke(path)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.setPen(self.selected_pen if value else self.normal_pen)
+            self.update()
+        return super().itemChange(change, value)
+
+    def set_normal_color(self, color):
+        self._original_color = color
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        if not self.isSelected():
+            self.setPen(self.normal_pen)
+        self.update()
+
+class SelectableGroup(QGraphicsItemGroup):
+    def __init__(self, color):
+        super().__init__()
+        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable)
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        self.selected_pen = QPen(Qt.yellow, 0)
+        self.selected_pen.setCosmetic(True)
+        self.setAcceptHoverEvents(True)
+        self._original_color = color  # ذخیره رنگ اولیه
+
+    def shape(self):
+        path = QPainterPath()
+        for item in self.childItems():
+            if isinstance(item, QGraphicsLineItem):
+                child_path = QPainterPath()
+                child_path.moveTo(item.line().p1())
+                child_path.lineTo(item.line().p2())
+                path.addPath(child_path)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(2.0)
+        return stroker.createStroke(path)
+
+    def update_pen(self):
+        for item in self.childItems():
+            if isinstance(item, QGraphicsLineItem):
+                pen = self.selected_pen if self.isSelected() else self.normal_pen
+                item.setPen(pen)
+        self.update()
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            self.update_pen()
+        return super().itemChange(change, value)
+
+    def set_normal_color(self, color):
+        self._original_color = color
+        self.normal_pen = QPen(color, 0)
+        self.normal_pen.setCosmetic(True)
+        self.update_pen()
+
+class CustomGraphicsView(QGraphicsView):
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setMouseTracking(True)
+        self.zoom_factor = 1.15
+        self.is_panning = False
+        self.last_pan_point = QPointF()
+        self.parent = parent
+        self.is_dragging = False
+        self.last_drag_pos = QPointF()
+        self.initial_positions = {}
+
+    def wheelEvent(self, event):
+        mouse_pos = self.mapToScene(event.pos())
+        if hasattr(self.parent, 'update_mouse_position'):
+            self.parent.update_mouse_position(mouse_pos.x(), mouse_pos.y())
+        zoom_in = event.angleDelta().y() > 0
+        zoom = self.zoom_factor if zoom_in else 1 / self.zoom_factor
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.scale(zoom, zoom)
+        new_pos = self.mapToScene(event.pos())
+        delta = new_pos - mouse_pos
+        self.translate(delta.x(), delta.y())
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and event.modifiers() == Qt.ControlModifier:
+            self.is_panning = True
+            self.last_pan_point = self.mapToScene(event.pos())
+            self.setCursor(Qt.ClosedHandCursor)
+        elif event.button() == Qt.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            items = self.items(event.pos())
+            selectable_items = [item for item in items if item.flags() & QGraphicsItem.ItemIsSelectable and item.shape().contains(scene_pos - item.pos())]
+            selected_items = self.scene().selectedItems()
+            clicked_on_selected = any(item.boundingRect().translated(item.pos()).contains(scene_pos) for item in selected_items)
+            if selectable_items and not clicked_on_selected:
+                closest_item = min(selectable_items, key=lambda item: item.boundingRect().width() * item.boundingRect().height())
+                if not (event.modifiers() & Qt.ShiftModifier):
+                    for selected_item in selected_items:
+                        if selected_item != closest_item:
+                            selected_item.setSelected(False)
+                            if isinstance(selected_item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                                selected_item.setPen(selected_item.normal_pen)
+                            elif isinstance(selected_item, SelectableGroup):
+                                selected_item.update_pen()
+                            selected_item.update()
+                closest_item.setSelected(True)
+                if isinstance(closest_item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                    closest_item.setPen(closest_item.selected_pen)
+                elif isinstance(closest_item, SelectableGroup):
+                    closest_item.update_pen()
+                closest_item.update()
+                self.is_dragging = True
+                self.last_drag_pos = self.mapToScene(event.pos())
+                self.initial_positions = {item: item.pos() for item in selected_items + [closest_item] if item.flags() & QGraphicsItem.ItemIsMovable}
+            elif clicked_on_selected:
+                self.is_dragging = True
+                self.last_drag_pos = self.mapToScene(event.pos())
+                self.initial_positions = {item: item.pos() for item in selected_items if item.flags() & QGraphicsItem.ItemIsMovable}
+            else:
+                if not (event.modifiers() & Qt.ShiftModifier):
+                    for selected_item in selected_items:
+                        selected_item.setSelected(False)
+                        if isinstance(selected_item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                            selected_item.setPen(selected_item.normal_pen)
+                        elif isinstance(selected_item, SelectableGroup):
+                            selected_item.update_pen()
+                        selected_item.update()
+                super().mousePressEvent(event)
+            self.scene().update()
+            self.viewport().update()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        mouse_pos = self.mapToScene(event.pos())
+        if hasattr(self.parent, 'update_mouse_position'):
+            self.parent.update_mouse_position(mouse_pos.x(), mouse_pos.y())
+        if self.is_panning:
+            current_pos = self.mapToScene(event.pos())
+            delta = current_pos - self.last_pan_point
+            self.last_pan_point = current_pos
+            self.translate(delta.x(), delta.y())
+        elif self.is_dragging:
+            current_pos = self.mapToScene(event.pos())
+            delta = current_pos - self.last_drag_pos
+            self.last_drag_pos = current_pos
+            for item in self.scene().selectedItems():
+                if item.flags() & QGraphicsItem.ItemIsMovable:
+                    item.moveBy(delta.x(), delta.y())
+                    item.update()
+            self.parent.update_simulation_paths()
+        else:
+            super().mouseMoveEvent(event)
+        self.scene().update()
+        self.viewport().update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_panning:
+            self.is_panning = False
+            self.setCursor(Qt.ArrowCursor)
+        elif event.button() == Qt.LeftButton and self.is_dragging:
+            self.is_dragging = False
+            moved_items = []
+            for item in self.scene().selectedItems():
+                if item.flags() & QGraphicsItem.ItemIsMovable and item in self.initial_positions:
+                    initial_pos = self.initial_positions[item]
+                    final_pos = item.pos()
+                    if initial_pos != final_pos:
+                        moved_items.append((item, initial_pos, final_pos))
+            if moved_items:
+                self.parent.add_undo_action({"type": "move", "items": moved_items})
+            self.initial_positions = {}
+            for item in self.scene().items():
+                if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                    if item.isSelected():
+                        if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                            item.setPen(item.selected_pen)
+                        elif isinstance(item, SelectableGroup):
+                            item.update_pen()
+                    else:
+                        if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                            item.setPen(item.normal_pen)
+                        elif isinstance(item, SelectableGroup):
+                            item.update_pen()
+                    item.update()
+            self.parent.update_simulation_paths()
+        else:
+            super().mouseReleaseEvent(event)
+        self.scene().update()
+        self.viewport().update()
+
+class LaserPreviewWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.gcode_paths = []
+        self.graphics_items = []
+        self.speed = 500
+        self.worktable_width = 1300
+        self.worktable_height = 900
+        self.bounding_min_x = 0
+        self.bounding_min_y = 0
+        self.bounding_max_x = 0
+        self.bounding_max_y = 0
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setSpacing(5)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+
+        self.controls_layout = QHBoxLayout()
+        self.run_button = QPushButton(self)
+        self.run_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaPlay))
+        self.run_button.setFixedSize(40, 40)
+        self.run_button.clicked.connect(self.run_simulation)
+        self.controls_layout.addWidget(self.run_button)
+
+        self.pause_button = QPushButton(self)
+        self.pause_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaPause))
+        self.pause_button.setFixedSize(40, 40)
+        self.pause_button.clicked.connect(self.pause_simulation)
+        self.controls_layout.addWidget(self.pause_button)
+
+        self.speed_label = QLabel("سرعت شبیه‌سازی:")
+        self.controls_layout.addWidget(self.speed_label)
+
+        self.speed_slider = QSlider(Qt.Horizontal, self)
+        self.speed_slider.setMinimum(1)
+        self.speed_slider.setMaximum(1000)
+        self.speed_slider.setValue(50)
+        self.speed_slider.setFixedWidth(200)
+        self.speed_slider.valueChanged.connect(self.update_speed_label)
+        self.controls_layout.addWidget(self.speed_slider)
+
+        self.speed_display_label = QLabel("50x")
+        self.controls_layout.addWidget(self.speed_display_label)
+
+        self.controls_layout.addStretch()
+        self.layout.addLayout(self.controls_layout)
+
+        self.preview_scene = QGraphicsScene(self)
+        self.preview_view = QGraphicsView(self.preview_scene, self)
+        self.preview_view.setRenderHint(QPainter.Antialiasing)
+        self.preview_view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.preview_scene.setBackgroundBrush(Qt.black)
+        self.preview_view.setFixedSize(400, 400)
+        self.layout.addWidget(self.preview_view)
+
+        self.simulation_timer = QTimer(self)
+        self.simulation_timer.timeout.connect(self.update_simulation)
+        self.blink_timer = QTimer(self)
+        self.blink_timer.timeout.connect(self.toggle_button_blink)
+        self.blink_state = False
+        self.active_button = None
+
+        self.laser_head = None
+        self.current_path_index = 0
+        self.current_t = 0
+        self.laser_on = False
+        self.current_position = None
+        self.is_moving_to_path = False
+        self.is_paused = False
+        self.line_items = []
+
+    def update_speed_label(self):
+        speed_factor = self.speed_slider.value()
+        self.speed_display_label.setText(f"{speed_factor}x")
+
+    def parse_gcode(self, gcode):
+        self.gcode_paths = []
+        current_x, current_y = 0, 0
+        for line in gcode.splitlines():
+            line = line.strip()
+            if not line or line.startswith(';'):
+                continue
+            tokens = line.split()
+            if not tokens:
+                continue
+            command = tokens[0]
+            params = {}
+            try:
+                for token in tokens[1:]:
+                    if token[0] in 'XYFS':
+                        params[token[0]] = float(token[1:])
+            except ValueError as e:
+                self.parent.label.setText(f"خطا در پارس G-Code خط '{line}': {e}")
+                return []
+            if command == 'G0' or command == 'G1':
+                target_x = params.get('X', current_x)
+                target_y = params.get('Y', current_y)
+                self.gcode_paths.append(('line', (current_x, current_y), (target_x, target_y)))
+                current_x, current_y = target_x, target_y
+            elif command == 'F':
+                self.speed = params.get('F', self.speed)
+        return self.gcode_paths
+
+    def set_simulation_data(self, gcode, graphics_items, speed, worktable_width, worktable_height, bounding_box):
+        self.gcode_paths = self.parse_gcode(gcode)
+        self.graphics_items = graphics_items
+        self.speed = speed
+        self.worktable_width = worktable_width
+        self.worktable_height = worktable_height
+        self.bounding_min_x, self.bounding_min_y, self.bounding_max_x, self.bounding_max_y = bounding_box
+        if not self.is_paused and not self.simulation_timer.isActive():
+            self.draw_paths()
+
+    def update_paths(self, gcode, graphics_items, bounding_box):
+        self.gcode_paths = self.parse_gcode(gcode)
+        self.graphics_items = graphics_items
+        self.bounding_min_x, self.bounding_min_y, self.bounding_max_x, self.bounding_max_y = bounding_box
+        if not self.is_paused and not self.simulation_timer.isActive():
+            self.draw_paths()
+
+    def draw_paths(self):
+        if self.simulation_timer.isActive():
+            return
+        # پاک کردن صحنه
+        self.preview_scene.clear()
+        self.line_items = []
+        min_x, min_y = float('inf'), float('inf')
+        max_x, max_y = float('-inf'), float('-inf')
+        has_valid_path = False
+
+        # رسم مسیرهای G-Code
+        for segment_type, p1, p2 in self.gcode_paths:
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in p1 + p2):
+                continue
+            x1, y1 = p1[0], p1[1]
+            x2, y2 = p2[0], p2[1]
+            min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+            min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+            if segment_type == "line":
+                line = QGraphicsLineItem(x1, y1, x2, y2)
+                pen = QPen(Qt.white, 0)
+                pen.setCosmetic(True)
+                line.setPen(pen)
+                self.preview_scene.addItem(line)
+                self.line_items.append((line, Qt.white))
+                has_valid_path = True
+
+        if not has_valid_path:
+            self.preview_scene.clear()
+            self.preview_scene.setSceneRect(0, 0, 400, 400)
+            self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+            self.parent.label.setText("هیچ مسیر معتبری برای نمایش وجود ندارد")
+            return
+
+        # رسم مستطیل محدوده
+        bounding_rect = QGraphicsRectItem(self.bounding_min_x, self.bounding_min_y,
+                                         self.bounding_max_x - self.bounding_min_x,
+                                         self.bounding_max_y - self.bounding_min_y)
+        pen = QPen(Qt.green, 0, Qt.DashLine)
+        pen.setCosmetic(True)
+        bounding_rect.setPen(pen)
+        self.preview_scene.addItem(bounding_rect)
+
+        # تنظیم محدوده صحنه
+        margin = 20
+        self.preview_scene.setSceneRect(min_x - margin, min_y - margin,
+                                       max_x - min_x + 2 * margin,
+                                       max_y - min_y + 2 * margin)
+        self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+        self.preview_scene.update()
+        self.preview_view.viewport().repaint()
+
+    def run_simulation(self):
+        if not self.gcode_paths:
+            self.parent.label.setText("هیچ مسیری برای شبیه‌سازی وجود ندارد")
+            return
+        if self.is_paused:
+            self.is_paused = False
+            self.simulation_timer.start(10)
+            self.set_active_button(self.run_button)
+            return
+        self.current_path_index = 0
+        self.current_t = 0
+        self.laser_on = False
+        self.is_moving_to_path = True
+        if self.laser_head:
+            self.preview_scene.removeItem(self.laser_head)
+        self.laser_head = None
+        # بازگرداندن رنگ خطوط به حالت اولیه
+        for line, original_color in self.line_items:
+            pen = QPen(original_color, 0)
+            pen.setCosmetic(True)
+            line.setPen(pen)
+        self.draw_paths()
+        start_x = self.worktable_width / 2
+        start_y = self.worktable_height / 2
+        self.laser_head = QGraphicsEllipseItem(start_x - 2, start_y - 2, 4, 4)
+        self.laser_head.setBrush(QBrush(Qt.red))
+        self.laser_head.setPen(QPen(Qt.red, 0))
+        self.preview_scene.addItem(self.laser_head)
+        self.current_position = (start_x, start_y)
+        self.simulation_timer.start(10)
+        self.set_active_button(self.run_button)
+
+    def pause_simulation(self):
+        if not self.is_paused:
+            self.is_paused = True
+            self.simulation_timer.stop()
+            self.set_active_button(self.pause_button)
+
+    def set_active_button(self, button):
+        if self.active_button:
+            self.active_button.setStyleSheet("")
+        self.active_button = button
+        if button:
+            self.blink_timer.start(500)
+        else:
+            self.blink_timer.stop()
+
+    def toggle_button_blink(self):
+        if self.active_button:
+            self.blink_state = not self.blink_state
+            if self.blink_state:
+                self.active_button.setStyleSheet("background-color: red; color: white;")
+            else:
+                self.active_button.setStyleSheet("background-color: none; color: none;")
+        else:
+            self.blink_timer.stop()
+
+    def update_simulation(self):
+        if not self.gcode_paths:
+            self.parent.label.setText("هیچ مسیری برای شبیه‌سازی وجود ندارد")
+            self.simulation_timer.stop()
+            self.set_active_button(None)
+            if self.laser_head:
+                self.preview_scene.removeItem(self.laser_head)
+                self.laser_head = None
+            return
+
+        speed_factor = self.speed_slider.value() / 50.0
+        step = 0.05 * self.speed * speed_factor / 100
+
+        if self.current_path_index >= len(self.gcode_paths):
+            self.parent.label.setText("شبیه‌سازی تکمیل شد")
+            self.simulation_timer.stop()
+            self.set_active_button(None)
+            if self.laser_head:
+                self.preview_scene.removeItem(self.laser_head)
+                self.laser_head = None
+            return
+
+        segment_type, p1, p2 = self.gcode_paths[self.current_path_index]
+        x1, y1 = p1
+        x2, y2 = p2
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+            self.current_path_index += 1
+            self.current_t = 0
+            self.parent.label.setText(f"خطا: نقاط نامعتبر در مسیر {self.current_path_index}")
+            return
+
+        current_x, current_y = self.current_position
+        dx = x2 - current_x
+        dy = y2 - current_y
+        distance = math.sqrt(dx**2 + dy**2)
+
+        if distance <= step:
+            self.current_position = (x2, y2)
+            if self.laser_head:
+                self.laser_head.setPos(x2 - 2, y2 - 2)
+            self.current_path_index += 1
+            self.current_t = 0
+            if self.current_path_index < len(self.line_items):
+                line, _ = self.line_items[self.current_path_index - 1]
+                pen = QPen(Qt.red, 0)
+                pen.setCosmetic(True)
+                line.setPen(pen)
+        else:
+            t = step / distance
+            new_x = current_x + t * dx
+            new_y = current_y + t * dy
+            self.current_position = (new_x, new_y)
+            if self.laser_head:
+                self.laser_head.setPos(new_x - 2, new_y - 2)
+
+        self.preview_scene.update()
+        self.preview_view.viewport().repaint()
+
+class TableConfigDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("پیکربندی میز")
+        self.setGeometry(200, 200, 400, 250)
+        self.layout = QVBoxLayout(self)
+        self.profile_label = QLabel("پروفایل میز:", self)
+        self.layout.addWidget(self.profile_label)
+        self.profile_combo = QComboBox(self)
+        self.profile_combo.addItems(["پیش‌فرض", "دستگاه سفارشی ۱", "دستگاه سفارشی ۲"])
+        self.layout.addWidget(self.profile_combo)
+        self.width_label = QLabel("عرض میز (میلی‌متر):", self)
+        self.layout.addWidget(self.width_label)
+        self.width_input = QLineEdit(str(parent.worktable_width), self)
+        self.layout.addWidget(self.width_input)
+        self.height_label = QLabel("ارتفاع میز (میلی‌متر):", self)
+        self.layout.addWidget(self.height_label)
+        self.height_input = QLineEdit(str(parent.worktable_height), self)
+        self.layout.addWidget(self.height_input)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.save_settings)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+        self.parent = parent
+
+    def save_settings(self):
+        try:
+            new_width = float(self.width_input.text())
+            new_height = float(self.height_input.text())
+            if new_width > 0 and new_height > 0:
+                self.parent.worktable_width = new_width
+                self.parent.worktable_height = new_height
+                self.parent.view.setSceneRect(0, 0, new_width, new_height)
+                self.parent.scene.clear()
+                self.parent.draw_worktable()
+                for path, item in self.parent.graphics_items:
+                    self.parent.scene.addItem(item)
+                self.parent.view.fitInView(0, 0, new_width, new_height, Qt.KeepAspectRatio)
+                self.parent.label.setText("اندازه میز با موفقیت به‌روزرسانی شد")
+                settings = {
+                    "table_width": new_width,
+                    "table_height": new_height,
+                    "profile": self.profile_combo.currentText()
+                }
+                with open("table_settings.json", "w") as f:
+                    json.dump(settings, f)
+                self.accept()
+            else:
+                self.parent.label.setText("ابعاد میز باید مثبت باشند")
+        except ValueError:
+            self.parent.label.setText("ابعاد میز نامعتبر است")
+
+class CNCApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("CNCSoft")
+        self.setGeometry(100, 100, 1700, 900)
+        self.paths = []
+        self.graphics_items = []
+        self.used_colors = []
+        self.bounding_min_x = 0
+        self.bounding_min_y = 0
+        self.bounding_max_x = 0
+        self.bounding_max_y = 0
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_undo_steps = 50
+
+        self.central_widget = QWidget(self)
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QHBoxLayout(self.central_widget)
+
+        self.left_layout = QVBoxLayout()
+        self.main_layout.addLayout(self.left_layout)
+
+        self.menu_bar = self.menuBar()
+        self.file_menu = self.menu_bar.addMenu("فایل")
+        self.import_action = QtWidgets.QAction("وارد کردن فایل", self)
+        self.import_action.triggered.connect(self.open_dxf)
+        self.file_menu.addAction(self.import_action)
+        self.edit_menu = self.menu_bar.addMenu("ویرایش")
+        self.config_menu = self.menu_bar.addMenu("پیکربندی")
+        self.help_menu = self.menu_bar.addMenu("راهنما")
+        self.table_config_action = QtWidgets.QAction("تنظیمات میز", self)
+        self.table_config_action.triggered.connect(self.open_table_config)
+        self.config_menu.addAction(self.table_config_action)
+
+        button_style = """
+            QPushButton {
+                background-color: #e8ecef;
+                border: 1px solid #adb5bd;
+                padding: 6px;
+                border-radius: 6px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #dee2e6;
+            }
+            QPushButton:pressed {
+                background-color: #ced4da;
+                border: 1px solid #6c757d;
+            }
+        """
+
+        self.button_layout = QHBoxLayout()
+        self.button_gcode = QtWidgets.QPushButton("تولید G-Code", self)
+        self.button_gcode.setFixedSize(150, 30)
+        self.button_gcode.clicked.connect(self.generate_gcode)
+        self.button_gcode.setEnabled(False)
+        self.button_gcode.setStyleSheet(button_style)
+        self.button_layout.addWidget(self.button_gcode)
+
+        self.button_delete = QtWidgets.QPushButton("حذف انتخاب‌شده‌ها", self)
+        self.button_delete.setFixedSize(150, 30)
+        self.button_delete.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_TrashIcon))
+        self.button_delete.clicked.connect(self.delete_selected_items)
+        self.button_delete.setStyleSheet(button_style)
+        self.button_layout.addWidget(self.button_delete)
+
+        self.button_undo = QtWidgets.QPushButton("بازگردانی", self)
+        self.button_undo.setFixedSize(100, 30)
+        self.button_undo.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack))
+        self.button_undo.clicked.connect(self.undo)
+        self.button_undo.setStyleSheet(button_style)
+        self.button_layout.addWidget(self.button_undo)
+
+        self.button_redo = QtWidgets.QPushButton("تکرار", self)
+        self.button_redo.setFixedSize(100, 30)
+        self.button_redo.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowForward))
+        self.button_redo.clicked.connect(self.redo)
+        self.button_redo.setStyleSheet(button_style)
+        self.button_layout.addWidget(self.button_redo)
+
+        self.button_layout.addStretch()
+        self.left_layout.addLayout(self.button_layout)
+
+        self.input_layout = QHBoxLayout()
+        self.label_speed = QLabel("سرعت (F):", self)
+        self.input_layout.addWidget(self.label_speed)
+        self.input_speed = QLineEdit("500", self)
+        self.input_speed.setFixedWidth(60)
+        self.input_layout.addWidget(self.input_speed)
+        self.label_power = QLabel("قدرت (S):", self)
+        self.input_layout.addWidget(self.label_power)
+        self.input_power = QLineEdit("1000", self)
+        self.input_power.setFixedWidth(60)
+        self.input_layout.addWidget(self.input_power)
+        self.input_layout.addStretch()
+        self.left_layout.addLayout(self.input_layout)
+
+        self.label = QtWidgets.QLabel("هیچ فایلی انتخاب نشده", self)
+        self.left_layout.addWidget(self.label)
+
+        self.mouse_layout = QHBoxLayout()
+        self.label_mouse_x = QLabel("موقعیت X ماوس:", self)
+        self.mouse_layout.addWidget(self.label_mouse_x)
+        self.input_mouse_x = QLineEdit("0", self)
+        self.input_mouse_x.setFixedWidth(60)
+        self.input_mouse_x.setReadOnly(True)
+        self.mouse_layout.addWidget(self.input_mouse_x)
+        self.label_mouse_y = QLabel("موقعیت Y ماوس:", self)
+        self.mouse_layout.addWidget(self.label_mouse_y)
+        self.input_mouse_y = QLineEdit("0", self)
+        self.input_mouse_y.setFixedWidth(60)
+        self.input_mouse_y.setReadOnly(True)
+        self.mouse_layout.addWidget(self.input_mouse_y)
+        self.mouse_layout.addStretch()
+        self.left_layout.addLayout(self.mouse_layout)
+
+        self.scene = QGraphicsScene(self)
+        self.view = CustomGraphicsView(self.scene, self)
+        self.view.setMinimumSize(1276, 748)
+        self.left_layout.addWidget(self.view)
+
+        self.right_layout = QVBoxLayout()
+        self.main_layout.addLayout(self.right_layout)
+
+        self.color_palette = ColorPalette(self)
+        self.right_layout.addWidget(self.color_palette)
+
+        self.layer_box = LayerBox(self)
+        self.right_layout.addWidget(self.layer_box)
+
+        self.laser_preview_widget = LaserPreviewWidget(self)
+        self.right_layout.addWidget(self.laser_preview_widget)
+        self.right_layout.addStretch()
+
+        self.worktable_width = 1300
+        self.worktable_height = 900
+        if os.path.exists("table_settings.json"):
+            try:
+                with open("table_settings.json", "r") as f:
+                    settings = json.load(f)
+                    self.worktable_width = settings.get("table_width", 1300)
+                    self.worktable_height = settings.get("table_height", 900)
+            except Exception as e:
+                self.label.setText(f"خطا در بارگذاری تنظیمات: {str(e)}")
+        self.view.setSceneRect(0, 0, self.worktable_width, self.worktable_height)
+        self.draw_worktable()
+
+        self.shortcut_select_all = QShortcut(QKeySequence("Ctrl+A"), self)
+        self.shortcut_select_all.activated.connect(self.select_all_items)
+        self.shortcut_delete = QShortcut(QKeySequence("Delete"), self)
+        self.shortcut_delete.activated.connect(self.delete_selected_items)
+        self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.shortcut_undo.activated.connect(self.undo)
+        self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.shortcut_redo.activated.connect(self.redo)
+
+    def add_undo_action(self, action):
+        self.undo_stack.append(action)
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def select_all_items(self):
+        for item in self.scene.items():
+            if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                item.setSelected(True)
+                if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem)):
+                    item.setPen(item.selected_pen)
+                elif isinstance(item, SelectableGroup):
+                    item.update_pen()
+                item.update()
+        self.scene.update()
+        self.view.viewport().update()
+        self.label.setText("تمام آیتم‌ها انتخاب شدند")
+        self.update_simulation_paths()
+
+    def delete_selected_items(self):
+        selected_items = self.scene.selectedItems()
+        if not selected_items:
+            self.label.setText("هیچ آیتمی برای حذف انتخاب نشده")
+            return
+        deleted_items = []
+        for item in selected_items:
+            if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                for path, graphics_item in self.graphics_items:
+                    if graphics_item == item:
+                        deleted_items.append((path, graphics_item))
+                        self.paths.remove(path)
+                        self.graphics_items.remove((path, graphics_item))
+                        break
+                self.scene.removeItem(item)
+        if deleted_items:
+            self.add_undo_action({"type": "delete", "items": deleted_items})
+            self.update_used_colors()
+            self.label.setText(f"{len(deleted_items)} آیتم حذف شد")
+            self.update_simulation_paths()
+        else:
+            self.label.setText("هیچ آیتم معتبری برای حذف وجود ندارد")
+        self.scene.update()
+        self.view.viewport().update()
+
+    def undo(self):
+        if not self.undo_stack:
+            self.label.setText("چیزی برای بازگردانی وجود ندارد")
+            return
+        action = self.undo_stack.pop()
+        if action["type"] == "delete":
+            deleted_items = action["items"]
+            for path, item in deleted_items:
+                self.paths.append(path)
+                self.graphics_items.append((path, item))
+                self.scene.addItem(item)
+            self.redo_stack.append(action)
+            self.update_used_colors()
+            self.label.setText(f"{len(deleted_items)} آیتم بازیابی شد")
+            self.update_simulation_paths()
+        elif action["type"] == "move":
+            moved_items = action["items"]
+            for item, initial_pos, final_pos in moved_items:
+                item.setPos(initial_pos)
+                item.update()
+            self.redo_stack.append(action)
+            self.label.setText(f"جابجایی {len(moved_items)} آیتم بازگردانی شد")
+            self.update_simulation_paths()
+        self.scene.update()
+        self.view.viewport().update()
+
+    def redo(self):
+        if not self.redo_stack:
+            self.label.setText("چیزی برای تکرار وجود ندارد")
+            return
+        action = self.redo_stack.pop()
+        if action["type"] == "delete":
+            deleted_items = action["items"]
+            for path, item in deleted_items:
+                self.paths.remove(path)
+                self.graphics_items.remove((path, item))
+                self.scene.removeItem(item)
+            self.undo_stack.append(action)
+            self.update_used_colors()
+            self.label.setText(f"{len(deleted_items)} آیتم دوباره حذف شد")
+            self.update_simulation_paths()
+        elif action["type"] == "move":
+            moved_items = action["items"]
+            for item, initial_pos, final_pos in moved_items:
+                item.setPos(final_pos)
+                item.update()
+            self.undo_stack.append(action)
+            self.label.setText(f"جابجایی {len(moved_items)} آیتم دوباره انجام شد")
+            self.update_simulation_paths()
+        self.scene.update()
+        self.view.viewport().update()
+
+    def update_used_colors(self):
+        self.used_colors = []
+        for item in self.scene.items():
+            if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                color = item._original_color if hasattr(item, '_original_color') else item.normal_pen.color()
+                _, color_index = find_closest_color(color)
+                if (color, color_index) not in self.used_colors:
+                    self.used_colors.append((color, color_index))
+        self.used_colors.sort(key=lambda x: x[1])
+        used_colors_only = [color for color, _ in self.used_colors]
+        self.layer_box.update_layers(used_colors_only)
+
+    def open_table_config(self):
+        dialog = TableConfigDialog(self)
+        dialog.exec_()
+
+    def update_simulation_paths(self):
+        gcode = self.generate_gcode(return_only=True)
+        if not gcode:
+            return
+        min_x, min_y = float('inf'), float('inf')
+        max_x, max_y = float('-inf'), float('-inf')
+        for _, item in self.graphics_items:
+            if item.isSelected():
+                rect = item.sceneBoundingRect()
+                min_x, max_x = min(min_x, rect.left()), max(max_x, rect.right())
+                min_y, max_y = min(min_y, rect.top()), max(max_y, rect.bottom())
+        bounding_box = (min_x, min_y, max_x, max_y) if min_x != float('inf') else (0, 0, self.worktable_width, self.worktable_height)
+        self.laser_preview_widget.update_paths(gcode, self.graphics_items, bounding_box)
+
+    def change_selected_items_color(self, new_color):
+        selected_items = self.scene.selectedItems()
+        if not selected_items:
+            self.label.setText("هیچ آیتمی برای تغییر رنگ انتخاب نشده")
+            return
+        _, new_color_index = find_closest_color(new_color)
+        for item in selected_items:
+            if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                item.set_normal_color(new_color)
+        self.update_used_colors()
+        self.label.setText(f"رنگ {len(selected_items)} آیتم تغییر کرد")
+        self.scene.update()
+        self.view.viewport().update()
+        self.update_simulation_paths()
+
+    def update_mouse_position(self, x, y):
+        self.input_mouse_x.setText(f"{x:.2f}")
+        self.input_mouse_y.setText(f"{y:.2f}")
+
+    def draw_worktable(self):
+        self.scene.clear()
+        grid_step = 100
+        for x in range(0, int(self.worktable_width) + 1, grid_step):
+            line = QGraphicsLineItem(x, 0, x, self.worktable_height)
+            line.setPen(Qt.lightGray)
+            self.scene.addItem(line)
+            label = QGraphicsTextItem(str(x))
+            label.setPos(x - 10, self.worktable_height - 20)
+            self.scene.addItem(label)
+        for y in range(0, int(self.worktable_height) + 1, grid_step):
+            line = QGraphicsLineItem(0, y, self.worktable_width, y)
+            line.setPen(Qt.lightGray)
+            self.scene.addItem(line)
+            label = QGraphicsTextItem(str(self.worktable_height - y))
+            label.setPos(-30, y - 5)
+            self.scene.addItem(label)
+        border = QGraphicsLineItem(0, 0, self.worktable_width, 0)
+        border.setPen(Qt.black)
+        self.scene.addItem(border)
+        border = QGraphicsLineItem(0, self.worktable_height, self.worktable_width, self.worktable_height)
+        border.setPen(Qt.black)
+        self.scene.addItem(border)
+        border = QGraphicsLineItem(0, 0, 0, self.worktable_height)
+        border.setPen(Qt.black)
+        self.scene.addItem(border)
+        border = QGraphicsLineItem(self.worktable_width, 0, self.worktable_width, self.worktable_height)
+        border.setPen(Qt.black)
+        self.scene.addItem(border)
+
+    def open_dxf(self):
+        dialog = CustomFileDialog(self)
+        if dialog.exec_():
+            file_path = dialog.selectedFiles()[0]
+            try:
+                doc = ezdxf.readfile(file_path)
+                msp = doc.modelspace()
+                self.paths = []
+                self.graphics_items = []
+                self.used_colors = []
+                self.undo_stack = []
+                self.redo_stack = []
+                self.scene.clear()
+                self.draw_worktable()
+                min_x, min_y = float('inf'), float('inf')
+                max_x, max_y = float('-inf'), float('-inf')
+                temp_paths = []
+                temp_items = []
+                for entity in msp:
+                    color, color_index = aci_to_qcolor(entity.dxf.color) if hasattr(entity, 'dxf') and hasattr(entity.dxf, 'color') else (QColor(0, 0, 0), 8)
+                    if (color, color_index) not in self.used_colors:
+                        self.used_colors.append((color, color_index))
+                    if entity.dxftype() == "LINE":
+                        x1, y1 = entity.dxf.start.x, -entity.dxf.start.y
+                        x2, y2 = entity.dxf.end.x, -entity.dxf.end.y
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                            continue
+                        min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                        min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                        path = [("line", (x1, y1), (x2, y2))]
+                        line = SelectableGraphicsItem(x1, y1, x2, y2, color)
+                        temp_paths.append(path)
+                        temp_items.append((path, line))
+                    elif entity.dxftype() == "SPLINE":
+                        points = entity.fit_points if entity.fit_points else list(entity.flattening(distance=0.01))
+                        if len(points) < 2:
+                            continue
+                        num_segments = 200  # افزایش دقت
+                        is_line = all(abs(point[1] - points[0][1]) < 0.01 for point in points)
+                        path = []
+                        group = SelectableGroup(color)
+                        if is_line:
+                            x1, y1 = points[0][0], -points[0][1]
+                            x2, y2 = points[-1][0], -points[-1][1]
+                            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                                continue
+                            min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                            min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                            path = [("line", (x1, y1), (x2, y2))]
+                            line = QGraphicsLineItem(x1, y1, x2, y2)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            group.addToGroup(line)
+                        else:
+                            for i in range(len(points) - 1):
+                                x1, y1 = points[i][0], -points[i][1]
+                                x2, y2 = points[i + 1][0], -points[i + 1][1]
+                                if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                                    continue
+                                min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                                min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                                path.append(("line", (x1, y1), (x2, y2)))
+                                line = QGraphicsLineItem(x1, y1, x2, y2)
+                                pen = QPen(color, 0)
+                                pen.setCosmetic(True)
+                                line.setPen(pen)
+                                group.addToGroup(line)
+                        if path:
+                            temp_paths.append(path)
+                            temp_items.append((path, group))
+                    elif entity.dxftype() == "LWPOLYLINE":
+                        points = entity.get_points()
+                        if len(points) < 2:
+                            continue
+                        path = []
+                        group = SelectableGroup(color)
+                        for i in range(len(points) - 1):
+                            x1, y1 = points[i][0], -points[i][1]
+                            x2, y2 = points[i + 1][0], -points[i + 1][1]
+                            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                                continue
+                            min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                            min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                            path.append(("line", (x1, y1), (x2, y2)))
+                            line = QGraphicsLineItem(x1, y1, x2, y2)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            group.addToGroup(line)
+                        if entity.closed:
+                            x1, y1 = points[-1][0], -points[-1][1]
+                            x2, y2 = points[0][0], -points[0][1]
+                            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [x1, y1, x2, y2]):
+                                continue
+                            min_x, max_x = min(min_x, x1, x2), max(max_x, x1, x2)
+                            min_y, max_y = min(min_y, y1, y2), max(max_y, y1, y2)
+                            path.append(("line", (x1, y1), (x2, y2)))
+                            line = QGraphicsLineItem(x1, y1, x2, y2)
+                            pen = QPen(color, 0)
+                            pen.setCosmetic(True)
+                            line.setPen(pen)
+                            group.addToGroup(line)
+                        if path:
+                            temp_paths.append(path)
+                            temp_items.append((path, group))
+                    elif entity.dxftype() == "CIRCLE":
+                        center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                        radius = entity.dxf.radius
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, radius]) or radius <= 0:
+                            continue
+                        min_x, max_x = min(min_x, center_x - radius), max(max_x, center_x + radius)
+                        min_y, max_y = min(min_y, center_y - radius), max(max_y, center_y + radius)
+                        ellipse = SelectableEllipseItem(center_x - radius, center_y - radius, 2 * radius, 2 * radius, color)
+                        num_segments = 72  # افزایش دقت برای CIRCLE
+                        path = []
+                        for i in range(num_segments):
+                            angle1 = 2 * np.pi * i / num_segments
+                            angle2 = 2 * np.pi * (i + 1) / num_segments
+                            x1 = center_x + radius * np.cos(angle1)
+                            y1 = center_y + radius * np.sin(angle1)
+                            x2 = center_x + radius * np.cos(angle2)
+                            y2 = center_y + radius * np.sin(angle2)
+                            path.append(("line", (x1, y1), (x2, y2)))
+                        if path:
+                            temp_paths.append(path)
+                            temp_items.append((path, ellipse))
+                    elif entity.dxftype() == "ARC":
+                        center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                        radius = entity.dxf.radius
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, radius]) or radius <= 0:
+                            continue
+                        min_x, max_x = min(min_x, center_x - radius), max(max_x, center_x + radius)
+                        min_y, max_y = min(min_y, center_y - radius), max(max_y, center_y + radius)
+                        start_angle = math.radians(entity.dxf.start_angle)
+                        end_angle = math.radians(entity.dxf.end_angle)
+                        if end_angle < start_angle:
+                            end_angle += 2 * math.pi
+                        num_segments = 72  # افزایش دقت برای ARC
+                        path = []
+                        group = SelectableGroup(color)
+                        prev_x, prev_y = None, None
+                        for i in range(num_segments + 1):
+                            t = i / num_segments
+                            angle = start_angle + (end_angle - start_angle) * t
+                            x = center_x + radius * math.cos(angle)
+                            y = center_y + radius * math.sin(angle)
+                            if i > 0:
+                                path.append(("line", (prev_x, prev_y), (x, y)))
+                                line = QGraphicsLineItem(prev_x, prev_y, x, y)
+                                pen = QPen(color, 0)
+                                pen.setCosmetic(True)
+                                line.setPen(pen)
+                                group.addToGroup(line)
+                            prev_x, prev_y = x, y
+                        if path:
+                            temp_paths.append(path)
+                            temp_items.append((path, group))
+                    elif entity.dxftype() == "ELLIPSE":
+                        center_x, center_y = entity.dxf.center.x, -entity.dxf.center.y
+                        major_axis = entity.dxf.major_axis
+                        ratio = entity.dxf.ratio
+                        major_radius = math.sqrt(major_axis[0]**2 + major_axis[1]**2)
+                        minor_radius = major_radius * ratio
+                        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in [center_x, center_y, major_radius, minor_radius]) or major_radius <= 0 or minor_radius <= 0:
+                            continue
+                        min_x, max_x = min(min_x, center_x - major_radius), max(max_x, center_x + major_radius)
+                        min_y, max_y = min(min_y, center_y - major_radius), max(max_y, center_y + major_radius)
+                        rotation = math.atan2(major_axis[1], major_axis[0])
+                        start_angle = entity.dxf.start_angle if hasattr(entity.dxf, 'start_angle') else 0
+                        end_angle = entity.dxf.end_angle if hasattr(entity.dxf, 'end_angle') else 2 * math.pi
+                        if end_angle < start_angle:
+                            end_angle += 2 * math.pi
+                        num_segments = 72  # افزایش دقت برای ELLIPSE
+                        path = []
+                        group = SelectableGroup(color)
+                        prev_x, prev_y = None, None
+                        for i in range(num_segments + 1):
+                            t = i / num_segments
+                            angle = start_angle + (end_angle - start_angle) * t
+                            x_unrotated = major_radius * math.cos(angle)
+                            y_unrotated = minor_radius * math.sin(angle)
+                            x = center_x + x_unrotated * math.cos(rotation) - y_unrotated * math.sin(rotation)
+                            y = center_y + x_unrotated * math.sin(rotation) + y_unrotated * math.cos(rotation)
+                            if i > 0:
+                                path.append(("line", (prev_x, prev_y), (x, y)))
+                                line = QGraphicsLineItem(prev_x, prev_y, x, y)
+                                pen = QPen(color, 0)
+                                pen.setCosmetic(True)
+                                line.setPen(pen)
+                                group.addToGroup(line)
+                            prev_x, prev_y = x, y
+                        if path:
+                            temp_paths.append(path)
+                            temp_items.append((path, group))
+                if min_x == float('inf'):
+                    self.label.setText("هیچ موجودیت معتبری در فایل DXF یافت نشد")
+                    return
+                self.used_colors.sort(key=lambda x: x[1])
+                used_colors_only = [color for color, _ in self.used_colors]
+                self.layer_box.update_layers(used_colors_only)
+                center_x = (min_x + max_x) / 2
+                center_y = (min_y + max_y) / 2
+                offset_x = self.worktable_width / 2 - center_x
+                offset_y = self.worktable_height / 2 - center_y
+                for path, item in temp_items:
+                    if isinstance(item, SelectableGraphicsItem):
+                        line = item.line()
+                        item.setLine(line.x1() + offset_x, line.y1() + offset_y,
+                                     line.x2() + offset_x, line.y2() + offset_y)
+                    elif isinstance(item, SelectableEllipseItem):
+                        rect = item.rect()
+                        item.setRect(rect.x() + offset_x, rect.y() + offset_y, rect.width(), rect.height())
+                    elif isinstance(item, SelectableGroup):
+                        for child in item.childItems():
+                            if isinstance(child, QGraphicsLineItem):
+                                line = child.line()
+                                child.setLine(line.x1() + offset_x, line.y1() + offset_y,
+                                              line.x2() + offset_x, line.y2() + offset_y)
+                        item.setPos(item.pos().x() + offset_x, item.pos().y() + offset_y)
+                    self.paths.append(path)
+                    self.graphics_items.append((path, item))
+                    self.scene.addItem(item)
+                self.bounding_min_x = min_x + offset_x
+                self.bounding_min_y = min_y + offset_y
+                self.bounding_max_x = max_x + offset_x
+                self.bounding_max_y = max_y + offset_y
+                self.view.fitInView(0, 0, self.worktable_width, self.worktable_height, Qt.KeepAspectRatio)
+                self.button_gcode.setEnabled(True)
+                self.label.setText(f"فایل DXF با موفقیت بارگذاری شد: {file_path}")
+                self.scene.update()
+                self.view.viewport().update()
+                bounding_box = (self.bounding_min_x, self.bounding_min_y, self.bounding_max_x, self.bounding_max_y)
+                self.laser_preview_widget.set_simulation_data("", self.graphics_items, 500, self.worktable_width, self.worktable_height, bounding_box)
+            except Exception as e:
+                self.label.setText(f"خطا در بارگذاری فایل DXF: {str(e)}")
+
+    def generate_gcode(self, return_only=False):
+        try:
+            speed = float(self.input_speed.text())
+            power = float(self.input_power.text())
+            if speed <= 0 or power < 0:
+                self.label.setText("سرعت و قدرت باید مقادیر معتبر باشند")
+                return ""
+        except ValueError:
+            self.label.setText("سرعت یا قدرت نامعتبر است")
+            return ""
+        gcode = []
+        gcode.append("G90")  # مختصات مطلق
+        gcode.append("G21")  # واحدها به میلی‌متر
+        gcode.append(f"F{speed}")
+        current_x, current_y = self.worktable_width / 2, self.worktable_height / 2
+        gcode.append(f"G0 X{current_x:.2f} Y{current_y:.2f}")  # حرکت به موقعیت اولیه
+        gcode.append(f"M3 S{power}")  # روشن کردن لیزر
+        grouped_paths = {}
+        for path, item in self.graphics_items:
+            if isinstance(item, (SelectableGraphicsItem, SelectableEllipseItem, SelectableGroup)):
+                color = item._original_color if hasattr(item, '_original_color') else item.normal_pen.color()
+                _, color_index = find_closest_color(color)
+                if color_index not in grouped_paths:
+                    grouped_paths[color_index] = []
+                grouped_paths[color_index].append((path, item))
+        for color_index in sorted(grouped_paths.keys()):
+            paths = grouped_paths[color_index]
+            for path, item in paths:
+                pos = item.pos()
+                offset_x, offset_y = pos.x(), pos.y()
+                for segment_type, p1, p2 in path:
+                    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in p1 + p2):
+                        continue
+                    x1, y1 = p1[0] + offset_x, p1[1] + offset_y
+                    x2, y2 = p2[0] + offset_x, p2[1] + offset_y
+                    if abs(x1 - current_x) > 0.001 or abs(y1 - current_y) > 0.001:
+                        gcode.append("M5")  # خاموش کردن لیزر
+                        gcode.append(f"G0 X{x1:.2f} Y{y1:.2f}")  # حرکت سریع به نقطه شروع
+                        gcode.append(f"M3 S{power}")  # روشن کردن لیزر
+                    gcode.append(f"G1 X{x2:.2f} Y{y2:.2f}")  # حرکت خطی
+                    current_x, current_y = x2, y2
+        gcode.append("M5")  # خاموش کردن لیزر
+        gcode.append(f"G0 X{self.worktable_width / 2:.2f} Y{self.worktable_height / 2:.2f}")  # بازگشت به مرکز
+        gcode_text = "\n".join(gcode)
+        if return_only:
+            return gcode_text
+        try:
+            file_path, _ = QFileDialog.getSaveFileName(self, "ذخیره G-Code", "", "فایل‌های G-Code (*.nc)")
+            if file_path:
+                with open(file_path, "w") as f:
+                    f.write(gcode_text)
+                self.label.setText(f"G-Code با موفقیت ذخیره شد: {file_path}")
+                bounding_box = (self.bounding_min_x, self.bounding_min_y, self.bounding_max_x, self.bounding_max_y)
+                self.laser_preview_widget.set_simulation_data(gcode_text, self.graphics_items, speed, self.worktable_width, self.worktable_height, bounding_box)
+        except Exception as e:
+            self.label.setText(f"خطا در ذخیره G-Code: {str(e)}")
+        return gcode_text
+
+if __name__ == '__main__':
+    app = QtWidgets.QApplication(sys.argv)
+    window = CNCApp()
+    window.show()
+    sys.exit(app.exec_())
